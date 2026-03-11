@@ -1,29 +1,111 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 
 type FormState = {
   name: string;
   phone: string;
-  date: string; // YYYY-MM-DD
-  time: string; // HH:mm
+  date: string; // DD/MM/YYYY
+  time: string; // HH:mm (24h)
   address: string;
   payment: string;
   notes: string;
 };
 
-function buildMapsUrl(address: string) {
-  const q = encodeURIComponent(address.trim());
-  return `https://maps.google.com/?q=${q}`;
+function normalizeUsPhone(input: string) {
+  const digits = input.replace(/\D/g, "");
+
+  // 11 digits starting with 1 => US country code
+  if (digits.length === 11 && digits.startsWith("1")) {
+    const area = digits.slice(1, 4);
+    const first = digits.slice(4, 7);
+    const last = digits.slice(7, 11);
+    return `+1 (${area}) ${first}-${last}`;
+  }
+
+  // 10 digits => assume US local number
+  if (digits.length === 10) {
+    const area = digits.slice(0, 3);
+    const first = digits.slice(3, 6);
+    const last = digits.slice(6, 10);
+    return `+1 (${area}) ${first}-${last}`;
+  }
+
+  return input;
 }
 
-function formatDateTime(date: string, time: string) {
+function normalizeChicagoAreaAddress(input: string) {
+  const value = input.trim();
+  if (!value) return "";
+
+  const lower = value.toLowerCase();
+
+  const hasIllinoisHint =
+    lower.includes("illinois") ||
+    lower.includes(" il") ||
+    lower.endsWith(", il") ||
+    lower.includes("chicago") ||
+    lower.includes("aurora") ||
+    lower.includes("elgin") ||
+    lower.includes("naperville") ||
+    lower.includes("joliet") ||
+    lower.includes("waukegan") ||
+    lower.includes("evanston") ||
+    lower.includes("schaumburg") ||
+    lower.includes("arlington heights") ||
+    lower.includes("cicero") ||
+    lower.includes("oak park") ||
+    lower.includes("skokie") ||
+    lower.includes("des plaines");
+
+  if (hasIllinoisHint) return value;
+
+  // Bias toward Chicagoland/Illinois if user entered only a vague place
+  return `${value}, Illinois`;
+}
+
+function buildMapsUrl(address: string) {
+  const normalized = normalizeChicagoAreaAddress(address);
+  const q = encodeURIComponent(normalized);
+  return `https://www.google.com/maps/search/?api=1&query=${q}`;
+}
+
+function isValidDdMmYyyy(value: string) {
+  const match = value.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!match) return false;
+
+  const [, dd, mm, yyyy] = match;
+  const day = Number(dd);
+  const month = Number(mm);
+  const year = Number(yyyy);
+
+  if (month < 1 || month > 12 || day < 1 || year < 1900) return false;
+
+  const dt = new Date(year, month - 1, day);
+  return (
+    dt.getFullYear() === year &&
+    dt.getMonth() === month - 1 &&
+    dt.getDate() === day
+  );
+}
+
+function normalizeDateInput(input: string) {
+  const digits = input.replace(/\D/g, "").slice(0, 8);
+
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+}
+
+function formatPreviewDateTime(date: string, time: string) {
   if (!date || !time) return "";
-  // Keep it simple & predictable (no timezone surprises)
   return `${date} ${time}`;
 }
 
 export default function Home() {
+  const router = useRouter();
+
   const [form, setForm] = useState<FormState>({
     name: "",
     phone: "",
@@ -34,50 +116,68 @@ export default function Home() {
     notes: "",
   });
 
-  const [copied, setCopied] = useState(false);
-
+  const normalizedPhone = useMemo(() => normalizeUsPhone(form.phone), [form.phone]);
+  const normalizedAddress = useMemo(
+    () => normalizeChicagoAreaAddress(form.address),
+    [form.address]
+  );
   const mapsUrl = useMemo(() => {
-    return form.address.trim() ? buildMapsUrl(form.address) : "";
-  }, [form.address]);
+    return normalizedAddress ? buildMapsUrl(normalizedAddress) : "";
+  }, [normalizedAddress]);
 
-  const message = useMemo(() => {
-    const dt = formatDateTime(form.date, form.time);
-
+  const preview = useMemo(() => {
+    const dt = formatPreviewDateTime(form.date, form.time);
     const lines: string[] = [];
     lines.push("📅 Evento");
     if (form.name.trim()) lines.push(`🎤 Cliente: ${form.name.trim()}`);
-    if (form.phone.trim()) lines.push(`📱 Teléfono: ${form.phone.trim()}`);
+    if (normalizedPhone.trim()) lines.push(`📱 Teléfono: ${normalizedPhone.trim()}`);
     if (dt) lines.push(`🕒 Fecha y hora: ${dt}`);
-    if (form.address.trim()) lines.push(`📍 Dirección: ${form.address.trim()}`);
+    if (normalizedAddress.trim()) lines.push(`📍 Dirección: ${normalizedAddress.trim()}`);
     if (mapsUrl) lines.push(`🗺️ Mapa: ${mapsUrl}`);
     if (form.payment.trim()) lines.push(`💵 Pago: ${form.payment.trim()}`);
     if (form.notes.trim()) lines.push(`📝 Notas: ${form.notes.trim()}`);
-
     return lines.join("\n");
-  }, [form, mapsUrl]);
+  }, [form, normalizedPhone, normalizedAddress, mapsUrl]);
 
   const canGenerate =
     form.name.trim() &&
-    form.phone.trim() &&
-    form.date.trim() &&
+    normalizedPhone.trim() &&
+    isValidDdMmYyyy(form.date.trim()) &&
     form.time.trim() &&
-    form.address.trim() &&
+    normalizedAddress.trim() &&
     form.payment.trim();
 
-  async function handleCopy() {
-    await navigator.clipboard.writeText(message);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1200);
+  function goToConfirm() {
+    const params = new URLSearchParams({
+      name: form.name,
+      phone: normalizedPhone,
+      date: form.date,
+      time: form.time,
+      address: normalizedAddress,
+      payment: form.payment,
+      notes: form.notes,
+    });
+
+    router.push(`/confirm?${params.toString()}`);
   }
 
   return (
     <main className="min-h-screen p-6">
       <div className="mx-auto grid max-w-5xl gap-6 lg:grid-cols-2">
-        <header className="space-y-2 lg:col-span-2">
-          <h1 className="text-2xl font-semibold">Booking Dump</h1>
-          <p className="text-sm text-gray-600">
-            Captura los datos del evento y genera un mensaje listo para copiar/pegar.
-          </p>
+        <header className="space-y-3 lg:col-span-2">
+          <div>
+            <h1 className="text-2xl font-semibold">Booking Dump</h1>
+            <p className="text-sm text-gray-600">
+              Captura los datos del evento y genera un mensaje listo para copiar/pegar.
+            </p>
+          </div>
+
+          <a
+            href="/api/auth/google"
+            className="inline-flex h-10 items-center rounded-md border px-3 text-sm"
+          >
+            Conectar Google Calendar
+          </a>
         </header>
 
         <section className="rounded-xl border p-4">
@@ -90,28 +190,37 @@ export default function Home() {
             <Field label="Nombre">
               <input
                 className="h-10 w-full rounded-md border px-3"
-                placeholder="Ej. Andrea Pérez"
+                placeholder="Ej. Juan Perez"
                 value={form.name}
                 onChange={(e) => setForm((s) => ({ ...s, name: e.target.value }))}
               />
             </Field>
 
-            <Field label="Teléfono">
+            <Field label="Teléfono (USA)">
               <input
                 className="h-10 w-full rounded-md border px-3"
-                placeholder="Ej. +52 55 1234 5678"
+                placeholder="Ej. 3125551234 o +1 312 555 1234"
                 value={form.phone}
                 onChange={(e) => setForm((s) => ({ ...s, phone: e.target.value }))}
+                onBlur={() =>
+                  setForm((s) => ({ ...s, phone: normalizeUsPhone(s.phone) }))
+                }
               />
             </Field>
 
             <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="Fecha">
+              <Field label="Fecha (DD/MM/AAAA)">
                 <input
                   className="h-10 w-full rounded-md border px-3"
-                  type="date"
+                  placeholder="12/03/2026"
+                  inputMode="numeric"
                   value={form.date}
-                  onChange={(e) => setForm((s) => ({ ...s, date: e.target.value }))}
+                  onChange={(e) =>
+                    setForm((s) => ({
+                      ...s,
+                      date: normalizeDateInput(e.target.value),
+                    }))
+                  }
                 />
               </Field>
 
@@ -125,19 +234,25 @@ export default function Home() {
               </Field>
             </div>
 
-            <Field label="Dirección">
+            <Field label="Dirección (Chicago / Illinois)">
               <input
                 className="h-10 w-full rounded-md border px-3"
-                placeholder="Ej. Av. Insurgentes Sur 123, CDMX"
+                placeholder="Ej. Elgin, IL o Chicago"
                 value={form.address}
                 onChange={(e) => setForm((s) => ({ ...s, address: e.target.value }))}
+                onBlur={() =>
+                  setForm((s) => ({
+                    ...s,
+                    address: normalizeChicagoAreaAddress(s.address),
+                  }))
+                }
               />
             </Field>
 
             <Field label="Pago">
               <input
                 className="h-10 w-full rounded-md border px-3"
-                placeholder="Ej. $5,000 MXN (anticipo $2,000)"
+                placeholder="Ej. 1500 total, 500 a cuenta"
                 value={form.payment}
                 onChange={(e) => setForm((s) => ({ ...s, payment: e.target.value }))}
               />
@@ -146,7 +261,7 @@ export default function Home() {
             <Field label="Notas (opcional)">
               <textarea
                 className="min-h-24 w-full rounded-md border px-3 py-2"
-                placeholder="Ej. Llegar 30 min antes, dress code, referencias, etc."
+                placeholder="Ej. solo mariachi, no cumbias"
                 value={form.notes}
                 onChange={(e) => setForm((s) => ({ ...s, notes: e.target.value }))}
               />
@@ -156,46 +271,27 @@ export default function Home() {
               className="mt-2 h-10 rounded-md bg-black text-white disabled:opacity-50"
               type="button"
               disabled={!canGenerate}
-              onClick={() => {
-                // no-op: message is generated live; this is just a CTA for UX
-                const el = document.getElementById("output");
-                el?.scrollIntoView({ behavior: "smooth", block: "start" });
-              }}
+              onClick={goToConfirm}
             >
               Generar confirmación
             </button>
 
             {!canGenerate && (
               <p className="text-xs text-gray-600">
-                Completa los campos mínimos para habilitar el botón.
+                Completa los campos mínimos con fecha válida DD/MM/AAAA para habilitar el botón.
               </p>
             )}
           </div>
         </section>
 
         <section className="rounded-xl border p-4">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-medium" id="output">
-                Booking Confirmation
-              </h2>
-              <p className="mt-1 text-sm text-gray-600">
-                Copia y pega este texto por WhatsApp o SMS.
-              </p>
-            </div>
-
-            <button
-              className="h-10 shrink-0 rounded-md border px-3 text-sm disabled:opacity-50"
-              type="button"
-              disabled={!message.trim()}
-              onClick={handleCopy}
-            >
-              {copied ? "✅ Copiado" : "Copiar"}
-            </button>
-          </div>
+          <h2 className="text-lg font-medium">Booking Confirmation</h2>
+          <p className="mt-1 text-sm text-gray-600">
+            Copia y pega este texto por WhatsApp o SMS.
+          </p>
 
           <pre className="mt-4 whitespace-pre-wrap rounded-md border bg-black/5 p-3 text-sm">
-{message || "Empieza a llenar el formulario para generar el texto…"}
+            {preview || "Empieza a llenar el formulario para generar el texto…"}
           </pre>
         </section>
       </div>
